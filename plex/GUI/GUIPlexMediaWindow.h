@@ -68,6 +68,9 @@ class CGUIPlexMediaWindow : public CGUIMediaWindow, public IJobCallback, public 
     static CURL GetRealDirectoryUrl(const CStdString &strDirectory);
 
     void CheckPlexFilters(CFileItemList &list);
+    
+    void OnQueueItem(int iItem);
+    void AddItemToPlayList(const CFileItemPtr &pItem, CFileItemList &queuedItems);
 
   private:
     void AddFilters();
@@ -120,5 +123,4 @@ class CGUIPlexPictureWindow : public CGUIPlexMediaWindow
   public:
     CGUIPlexPictureWindow() : CGUIPlexMediaWindow(WINDOW_PICTURES, "MyPics.xml") {}
 };
-
 #endif // GUIWINDOWMEDIAFILTERVIEW_H

@@ -360,6 +360,9 @@
 #include "plex/GUI/GUIWindowPlexStartupHelper.h"
 #include "plex/PlexThemeMusicPlayer.h"
 #include "video/dialogs/GUIDialogVideoOSD.h"
+/* PLAYLIST SUPPORT */
+#include "plex/GUI/GUIWindowPlexVideoPlaylist.h"
+/* END PLAYLIST SUPPORT */
 /* END PLEX */
 
 #if defined(TARGET_ANDROID)
@@ -1529,6 +1532,9 @@ bool CApplication::Initialize()
     g_windowManager.Add(new CGUIDialogPlexSubtitlePicker);
     g_windowManager.Add(new CGUIWindowPlexStartupHelper);
     g_windowManager.Add(new CGUIPlexPictureWindow);
+    /* PLAYLIST SUPPORT */
+    g_windowManager.Add(new CGUIWindowPlexVideoPlaylist);
+    /* END PLAYLIST SUPPORT */
     /* END PLEX */
 
     /* window id's 3000 - 3100 are reserved for python */

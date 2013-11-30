@@ -37,7 +37,15 @@
 #include "Client/PlexTimelineManager.h"
 #include "Client/PlexServerDataLoader.h"
 #include "dialogs/GUIDialogYesNo.h"
-#include "Client/PlexExtraInfoLoader.h"
+
+/* PLAYLIST SUPPORT */
+#include "playlists/PlayListFactory.h"
+#include "playlists/PlayList.h"
+#include "PlayListPlayer.h"
+#include "settings/Settings.h"
+#include "PartyModeManager.h"
+#include "xbmc/addons/Skin.h"
+/* END PLAYLIST SUPPORT */
 
 #include "LocalizeStrings.h"
 #include "DirectoryCache.h"
@@ -68,6 +76,7 @@ bool CGUIPlexMediaWindow::OnMessage(CGUIMessage &message)
       Update(m_sectionRoot.Get(), false, false);
       break;
     }
+    
     case GUI_MSG_LOAD_SKIN:
     {
       /* This is called BEFORE the skin is reloaded, so let's save this event to be handled
@@ -406,6 +415,22 @@ bool CGUIPlexMediaWindow::OnAction(const CAction &action)
     else if (m_viewControl.GetSelectedItem() >= (m_pagingOffset - (PLEX_DEFAULT_PAGE_SIZE/2)))
       LoadNextPage();
   }
+  /* PLAYLIST SUPPORT */
+  else if (action.GetID() == ACTION_QUEUE_ITEM)
+  {
+    OnQueueItem(m_viewControl.GetSelectedItem());
+    return true;
+  }
+  else if (action.GetID() == ACTION_SHOW_PLAYLIST)
+  {
+    if (g_playlistPlayer.GetCurrentPlaylist() == PLAYLIST_VIDEO ||
+        g_playlistPlayer.GetPlaylist(PLAYLIST_VIDEO).size() > 0)
+    {
+          g_windowManager.ActivateWindow(WINDOW_VIDEO_PLAYLIST);
+          return true;
+    }
+  }
+  /* END PLAYLIST SUPPORT */
 
   return ret;
 }
@@ -413,6 +438,8 @@ bool CGUIPlexMediaWindow::OnAction(const CAction &action)
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 bool CGUIPlexMediaWindow::GetDirectory(const CStdString &strDirectory, CFileItemList &items)
 {
+  CLog::Log(LOGDEBUG, "CGUIPlexMediaWindow::GetDirectory - %s", strDirectory.c_str());
+
   CURL u(strDirectory);
   u.SetProtocolOption("containerStart", "0");
   u.SetProtocolOption("containerSize", boost::lexical_cast<std::string>(PLEX_DEFAULT_PAGE_SIZE));
@@ -434,6 +461,22 @@ bool CGUIPlexMediaWindow::GetDirectory(const CStdString &strDirectory, CFileItem
   CPlexServerPtr server = g_plexApplication.serverManager->FindByUUID(u.GetHostName());
   if (server && server->GetActiveConnection() && server->GetActiveConnection()->IsLocal())
     g_directoryCache.ClearDirectory(u.Get());
+  
+  /* PLAYLIST SUPPORT */
+  if ((items.GetPath() == "special://videoplaylists/") && !items.Contains("newplaylist://"))
+  {
+    CFileItemPtr newPlaylist(new CFileItem(g_settings.GetUserDataItem("PartyMode-Video.xsp"),false));
+    newPlaylist->SetLabel(g_localizeStrings.Get(16035));
+    newPlaylist->SetLabelPreformated(true);
+    newPlaylist->m_bIsFolder = true;
+    items.Add(newPlaylist);
+    
+    newPlaylist.reset(new CFileItem("newsmartplaylist://video", false));
+    newPlaylist->SetLabel(g_localizeStrings.Get(21437));  // "new smart playlist..."
+    newPlaylist->SetLabelPreformated(true);
+    items.Add(newPlaylist);
+  }
+  /* END PLAYLIST SUPPORT */
   
   if (items.HasProperty("totalSize"))
   {
@@ -648,7 +691,11 @@ bool CGUIPlexMediaWindow::OnContextButton(int itemNumber, CONTEXT_BUTTON button)
       if (IsVideoContainer() && g_application.IsPlayingVideo())
         g_windowManager.ActivateWindow(WINDOW_FULLSCREEN_VIDEO);
       else if (IsVideoContainer() && g_playlistPlayer.GetPlaylist(PLAYLIST_VIDEO).size() > 0)
-        CApplicationMessenger::Get().MediaPlay(PLAYLIST_VIDEO);
+        /* PLAYLIST SUPPORT */
+        {
+            g_windowManager.ActivateWindow(WINDOW_VIDEO_PLAYLIST);
+        }
+        /* END PLAYLIST SUPPORT */
       else if (IsMusicContainer() && g_application.IsPlayingAudio())
         g_windowManager.ActivateWindow(WINDOW_NOW_PLAYING);
        break;
@@ -807,9 +854,6 @@ bool CGUIPlexMediaWindow::Update(const CStdString &strDirectory, bool updateFilt
     m_history.RemoveParentPath();
 
   bool ret = CGUIMediaWindow::Update(newUrl.Get(), updateFilterPath);
-
-  g_plexApplication.extraInfo->LoadExtraInfoForItem(m_vecItems);
-
   if (!updateFromFilter)
     g_plexApplication.themeMusicPlayer->playForItem(*m_vecItems);
 
@@ -1113,3 +1157,131 @@ void CGUIPlexMediaWindow::AddFilters()
     }
   }
 }
+/* PLAYLIST SUPPORT */
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void CGUIPlexMediaWindow::OnQueueItem(int iItem)
+{
+  // don't re-queue items from playlist window
+  if ( iItem < 0 || iItem >= m_vecItems->Size() || GetID() == WINDOW_VIDEO_PLAYLIST ) return ;
+
+  // we take a copy so that we can alter the queue state
+  CFileItemPtr item(new CFileItem(*m_vecItems->Get(iItem)));
+  if (item->IsRAR() || item->IsZIP())
+    return;
+
+  //  Allow queuing of unqueueable items
+  //  when we try to queue them directly
+  if (!item->CanQueue())
+    item->SetCanQueue(true);
+
+  CFileItemList queuedItems;
+  AddItemToPlayList(item, queuedItems);
+  
+  // if party mode, add items but DONT start playing
+  if (g_partyModeManager.IsEnabled(PARTYMODECONTEXT_VIDEO))
+  {
+    g_partyModeManager.AddUserSongs(queuedItems, false);
+    return;
+  }
+
+  g_playlistPlayer.Add(PLAYLIST_VIDEO, queuedItems);
+  g_playlistPlayer.SetCurrentPlaylist(PLAYLIST_VIDEO);
+  // video does not auto play on queue like music
+  m_viewControl.SetSelectedItem(iItem + 1);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+void CGUIPlexMediaWindow::AddItemToPlayList(const CFileItemPtr &pItem, CFileItemList &queuedItems)
+{
+  if (!pItem->CanQueue() || pItem->IsRAR() || pItem->IsZIP() || pItem->IsParentFolder()) // no zip/rar enques thank you!
+    return;
+
+  if (pItem->m_bIsFolder)
+  {
+    if (pItem->IsParentFolder())
+      return;
+
+    // Check if we add a locked share
+    if ( pItem->m_bIsShareOrDrive )
+    {
+      CFileItem item = *pItem;
+      if ( !g_passwordManager.IsItemUnlocked( &item, "video" ) )
+        return;
+    }
+
+    // recursive
+    CFileItemList items;
+    GetDirectory(pItem->GetPath(), items);
+    FormatAndSort(items);
+
+    
+    int watchedMode = g_settings.GetWatchMode(items.GetContent());
+    bool unwatchedOnly = watchedMode == VIDEO_SHOW_UNWATCHED;
+    bool watchedOnly = watchedMode == VIDEO_SHOW_WATCHED;
+    
+    for (int i = 0; i < items.Size(); ++i)
+    {
+      if (items[i]->m_bIsFolder)
+      {
+        CStdString strPath = items[i]->GetPath();
+        URIUtils::RemoveSlashAtEnd(strPath);
+        strPath.ToLower();
+        if (strPath.size() > 6)
+        {
+          CStdString strSub = strPath.substr(strPath.size()-6);
+          if (strPath.Mid(strPath.size()-6).Equals("sample")) // skip sample folders
+            continue;
+        }
+      }
+      else if (items[i]->HasVideoInfoTag() &&
+       ((unwatchedOnly && items[i]->GetVideoInfoTag()->m_playCount > 0) ||
+        (watchedOnly && items[i]->GetVideoInfoTag()->m_playCount <= 0)))
+        continue;
+
+      AddItemToPlayList(items[i], queuedItems);
+    }
+  }
+  else
+  {
+    // just an item
+    if (pItem->IsPlayList())
+    {
+      std::auto_ptr<PLAYLIST::CPlayList> pPlayList (PLAYLIST::CPlayListFactory::Create(*pItem));
+      if (pPlayList.get())
+      {
+        // load it
+        if (!pPlayList->Load(pItem->GetPath()))
+        {
+          CGUIDialogOK::ShowAndGetInput(6, 0, 477, 0);
+          return; //hmmm unable to load playlist?
+        }
+
+        PLAYLIST::CPlayList playlist = *pPlayList;
+        for (int i = 0; i < (int)playlist.size(); ++i)
+        {
+          AddItemToPlayList(playlist[i], queuedItems);
+        }
+        return;
+      }
+    }
+    else if(pItem->IsInternetStream())
+    { // just queue the internet stream, it will be expanded on play
+      queuedItems.Add(pItem);
+    }
+    else if (pItem->IsPlugin() && pItem->GetProperty("isplayable") == "true")
+    { // a playable python files
+      queuedItems.Add(pItem);
+    }
+    else if (pItem->IsVideoDb())
+    { // this case is needed unless we allow IsVideo() to return true for videodb items,
+      // but then we have issues with playlists of videodb items
+      CFileItemPtr item(new CFileItem(*pItem->GetVideoInfoTag()));
+      queuedItems.Add(item);
+    }
+    else if (!pItem->IsNFO() && pItem->IsVideo())
+    {
+      queuedItems.Add(pItem);
+    }
+  }
+}
+/* END PLAYLIST SUPPORT */
